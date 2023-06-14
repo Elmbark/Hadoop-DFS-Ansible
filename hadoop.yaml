@@ -1,0 +1,141 @@
+---
+   - name: test1
+     hosts: hadoop
+     become: true
+     become_method: sudo
+
+     vars:
+      user_name: rangeer #obligatoire 
+      master_hostname: "master"
+      hadoop_version: "3.3.5"
+      hadoop_download_url: "https://archive.apache.org/dist/hadoop/common/hadoop-{{ hadoop_version }}/hadoop-{{ hadoop_version }}.tar.gz"
+      zookeeper_quorum: "{{ groups['zookeeper'] | join(',') }}"
+      yarn_acl_enable: "0"
+      yarn_resourcemanager_hostname: "master"
+      yarn_nodemanager_aux_services: "mapreduce_shuffle"
+      yarn_nodemanager_resource_memory_mb: "2826"
+      yarn_scheduler_maximum_allocation_mb: "2726"
+      yarn_scheduler_minimum_allocation_mb: "128"
+      yarn_nodemanager_vmem_check_enabled: "false"
+      yarn_nodemanager_resource_cpu_vcores: "2"
+
+     tasks:
+      - name: Set hostname to slaveX on all other machines in the group
+        hostname:
+         name: "slave{{ inventory_hostname.split('-')[-1] }}"
+        when: inventory_hostname != groups['hadoop'][0]
+
+      - name: Set static hostname to master
+        become: true
+        shell: "sudo hostnamectl set-hostname --static master"
+        when: inventory_hostname == groups['hadoop'][0]
+
+      - name: Install Java
+        apt:
+         name: openjdk-8-jre
+         state: present
+
+      - name: Download Hadoop
+        get_url:
+          url: "{{ hadoop_download_url }}"
+          dest: /tmp/hadoop.tgz
+          mode: 0755
+
+      - name: Extract Hadoop
+        unarchive:
+         src: /tmp/hadoop.tgz
+         dest: /usr/local/hadoop
+         remote_src: yes
+
+      - name: Set ownership of Hadoop directory
+        file:
+          path: "/usr/local/hadoop"
+          state: directory
+          owner: "root"
+          group: "root"
+
+      - name: Add variables to .bashrc
+        become: yes
+        copy:
+          content: |
+            # Java
+            export JAVA_HOME=/usr/lib/jvm/java-8-openjdk-amd64
+            # Hadoop
+            export HADOOP_HOME=/usr/local/hadoop
+            export PATH=$PATH:$HADOOP_HOME/bin
+            export PATH=$PATH:$HADOOP_HOME/sbin
+            export HADOOP_MAPRED_HOME=$HADOOP_HOME
+            export HADOOP_COMMON_HOME=$HADOOP_HOME
+            export HADOOP_HDFS_HOME=$HADOOP_HOME
+            export YARN_HOME=$HADOOP_HOME
+            export HADOOP_COMMON_LIB_NATIVE_DIR=$HADOOP_HOME/lib/native
+            export HADOOP_OPTS="-Djava.library.path=$HADOOP_HOME/lib"
+          dest: "/home/{{user_name}}/.bashrc"
+
+      - name: Set JAVA_HOME in hadoop-env.sh
+        become: yes
+        lineinfile:
+          path: /usr/local/hadoop/etc/hadoop/hadoop-env.sh
+          line: "{{ item }}"
+          regexp: '^export JAVA_HOME='
+          line: 'export JAVA_HOME=/usr/lib/jvm/java-8-openjdk-amd64'
+        with_items:
+          - export HDFS_NAMENODE_USER=root
+          - export HDFS_DATANODE_USER=root
+          - export HDFS_SECONDARYNAMENODE_USER=root
+          - export YARN_RESOURCEMANAGER_USER=root
+          - export YARN_NODEMANAGER_USER=root
+
+      - name: Configure YARN
+        template:
+          src: yarn-site.xml.j2
+          dest: /usr/local/hadoop/etc/hadoop/yarn-site.xml
+
+      - name: Add HDFS config to hdfs-site.xml
+        template:
+          src: hdfs-site.xml.j2
+          dest: /usr/local/hadoop/etc/hadoop/hdfs-site.xml
+
+      - name: Add core-site.xml configuration
+        template:
+          src: core-site.xml.j2
+          dest: /usr/local/hadoop/etc/hadoop/core-site.xml
+
+      - name: Add mapred-site.xml configuration
+        template:
+          src: mapred-site.xml.j2
+          dest: /usr/local/hadoop/etc/hadoop/mapred-site.xml
+      - name: Create HDFS directories
+        become_user: root
+        file:
+          path: "{{ item }}"
+          state: directory
+          owner: root
+          group: root
+          mode: '0755'
+        with_items:
+          - /usr/local/hadoop_store/hdfs/namenode
+          - /usr/local/hadoop_store/hdfs/datanode
+
+
+      - name: Add slave names
+        lineinfile:
+          path: /usr/local/hadoop/etc/hadoop/workers
+          line: "{{ item }}"
+          create: yes
+        with_items: "{{ groups['hadoop'] }}" #put the hadoop group slaves  
+        when: inventory_hostname == groups['hadoop'][0] #change by your all  group hadoop
+
+      - name: Format namenode
+        command: sudo /usr/local/hadoop/bin/hdfs namenode -format
+        when: inventory_hostname == groups['hadoop'][0] #change by your all  group hadoop
+
+
+      - name: Start DFS
+        command: sudo /usr/local/hadoop/sbin/start-dfs.sh
+        when: inventory_hostname == groups['hadoop'][0] #change by your all  group hadoop
+
+      - name: Start yarm
+        command: sudo /usr/local/hadoop/sbin/start-yarn.sh
+        when: inventory_hostname == groups['hadoop'][0] #change by your all  group hadoop
+
